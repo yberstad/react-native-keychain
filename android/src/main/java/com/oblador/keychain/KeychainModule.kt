@@ -35,6 +35,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
+
 @ReactModule(name = KeychainModule.KEYCHAIN_MODULE)
 @Suppress("unused")
 class KeychainModule(reactContext: ReactApplicationContext) :
@@ -422,7 +423,7 @@ class KeychainModule(reactContext: ReactApplicationContext) :
 
   @ReactMethod
   fun getInternetCredentialsForServer(server: String, options: ReadableMap?, promise: Promise) {
-    getGenericPassword(server, options, promise)
+    getGenericPassword(server, options, promise.timed("getInternetCredentialsForServer", tag = "CustomTimer"))
   }
 
   @ReactMethod
@@ -485,7 +486,9 @@ class KeychainModule(reactContext: ReactApplicationContext) :
     // The encrypted data is encrypted using the current CipherStorage, so we just decrypt and
     // return
     if (storageName == current.getCipherStorageName()) {
-      return decryptToResult(alias, current, resultSet, promptInfo)
+      return timeIt("CustomTimer", "decryptToResult") {
+        decryptToResult(alias, current, resultSet, promptInfo)
+      }
     }
 
     // The encrypted data is encrypted using an older CipherStorage, so we need to decrypt the data

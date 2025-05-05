@@ -14,6 +14,7 @@ import com.oblador.keychain.cipherStorage.CipherStorageBase.DecryptBytesHandler
 import com.oblador.keychain.cipherStorage.CipherStorageBase.EncryptStringHandler
 import com.oblador.keychain.exceptions.CryptoFailedException
 import com.oblador.keychain.exceptions.KeyStoreAccessException
+import com.oblador.keychain.timeItNoSuspend
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
@@ -79,6 +80,8 @@ abstract class CipherStorageBase(protected val applicationContext: Context) : Ci
         output.write(buf, 0, len)
       }
     }
+
+    private const val TAG = "KeyAttestation"
   }
 
   // endregion
@@ -128,28 +131,47 @@ abstract class CipherStorageBase(protected val applicationContext: Context) : Ci
 
   /** Try device capabilities by creating temporary key in keystore. */
   override fun supportsSecureHardware(): Boolean {
-    if (isSupportsSecureHardware != null) return isSupportsSecureHardware!!.get()
+    // Log entry and any cached value
+    Log.d(Companion.TAG, "supportsSecureHardware() called; cached = $isSupportsSecureHardware")
+
+    if (isSupportsSecureHardware != null) {
+      val cached = isSupportsSecureHardware!!.get()
+      Log.d(Companion.TAG, "Returning cached result = $cached")
+      return cached
+    }
 
     synchronized(_sync) {
-      // double check pattern in use
-      if (isSupportsSecureHardware != null) return isSupportsSecureHardware!!.get()
+      if (isSupportsSecureHardware != null) {
+        val cached = isSupportsSecureHardware!!.get()
+        Log.d(Companion.TAG, "Returning cached result inside sync = $cached")
+        return cached
+      }
 
       isSupportsSecureHardware = AtomicBoolean(false)
+      Log.d(Companion.TAG, "No cache yet — will perform hardware check")
 
       var sdk: SelfDestroyKey? = null
-
       try {
         sdk = SelfDestroyKey(TEST_KEY_ALIAS)
-        val newValue = validateKeySecurityLevel(SecurityLevel.SECURE_HARDWARE, sdk.key)
-        isSupportsSecureHardware!!.set(newValue)
-      } catch (ignored: Throwable) {
+        Log.d(Companion.TAG, "Created SelfDestroyKey; querying security level on alias=$TEST_KEY_ALIAS")
+
+        val pass = validateKeySecurityLevel(SecurityLevel.SECURE_HARDWARE, sdk.key)
+        isSupportsSecureHardware!!.set(pass)
+
+        Log.d(Companion.TAG, "validateKeySecurityLevel returned $pass")
+      } catch (t: Throwable) {
+        Log.e(Companion.TAG, "Error while checking secure hardware support", t)
       } finally {
         sdk?.close()
+        Log.d(Companion.TAG, "SelfDestroyKey closed")
       }
     }
 
-    return isSupportsSecureHardware!!.get()
+    val result = isSupportsSecureHardware!!.get()
+    Log.d(Companion.TAG, "supportsSecureHardware() final result = $result")
+    return result
   }
+
 
   /** {@inheritDoc} */
   override fun getDefaultAliasServiceName(): String {
@@ -388,34 +410,49 @@ abstract class CipherStorageBase(protected val applicationContext: Context) : Ci
     bytes: ByteArray,
     handler: DecryptBytesHandler?
   ): String {
-    val cipher = getCachedInstance()
-    try {
-      ByteArrayInputStream(bytes).use { input ->
-        ByteArrayOutputStream().use { output ->
-          handler?.initialize(cipher, key, input)
-
-          try {
-            val decrypted = cipher.doFinal(input.readBytes())
-            output.write(decrypted)
-          } catch (e: Exception) {
-            when {
-              e is UserNotAuthenticatedException -> throw e
-              e.cause is android.security.KeyStoreException &&
-                e.cause?.message?.contains("Key user not authenticated") == true -> {
-                throw UserNotAuthenticatedException()
-              }
-              else -> throw e
-            }
-          }
-
-          return String(output.toByteArray(), UTF8)
-        }
+    return timeItNoSuspend("CustomTimer", "decryptBytes.total") {
+      val cipher = timeItNoSuspend("CustomTimer", "decryptBytes.getCachedInstance") {
+        getCachedInstance()
       }
-    } catch (fail: Throwable) {
-      Log.w(LOG_TAG, fail.message, fail)
-      throw fail
+
+      try {
+        ByteArrayInputStream(bytes).use { input ->
+          ByteArrayOutputStream().use { output ->
+
+            timeItNoSuspend("CustomTimer", "decryptBytes.handlerInitialize") {
+              handler?.initialize(cipher, key, input)
+            }
+
+            val rawBytes = timeItNoSuspend("CustomTimer", "decryptBytes.readBytes") {
+              input.readBytes()
+            }
+
+            val decrypted = timeItNoSuspend("CustomTimer", "decryptBytes.cipherDoFinal") {
+              try {
+                cipher.doFinal(rawBytes)
+              } catch (e: Exception) {
+                when {
+                  e is UserNotAuthenticatedException -> throw e
+                  e.cause is android.security.KeyStoreException &&
+                          e.cause?.message?.contains("Key user not authenticated") == true -> {
+                    throw UserNotAuthenticatedException()
+                  }
+                  else -> throw e
+                }
+              }
+            }
+
+            output.write(decrypted)
+            return@timeItNoSuspend String(output.toByteArray(), UTF8)
+          }
+        }
+      } catch (fail: Throwable) {
+        Log.w(LOG_TAG, fail.message, fail)
+        throw fail
+      }
     }
   }
+
 
   /** Get the most secured keystore */
   @Throws(GeneralSecurityException::class)

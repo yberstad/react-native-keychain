@@ -15,6 +15,8 @@ import com.oblador.keychain.resultHandler.CryptoOperation
 import com.oblador.keychain.resultHandler.ResultHandler
 import com.oblador.keychain.exceptions.CryptoFailedException
 import com.oblador.keychain.exceptions.KeyStoreAccessException
+import com.oblador.keychain.timeIt
+import com.oblador.keychain.timeItNoSuspend
 import java.io.IOException
 import java.security.GeneralSecurityException
 import java.security.Key
@@ -129,12 +131,16 @@ class CipherStorageKeystoreAesGcm(reactContext: ReactApplicationContext, private
         var key: Key? = null
 
         try {
-            key = extractGeneratedKey(safeAlias, level, retries)
-            val results =
+            key = timeItNoSuspend("CustomTimer", "extractGeneratedKey") {
+                extractGeneratedKey(safeAlias, level, retries)
+            }
+
+            val results = timeItNoSuspend("CustomTimer", "DecryptionResult") {
                 CipherStorage.DecryptionResult(
                     decryptBytes(key, username),
                     decryptBytes(key, password)
                 )
+            }
 
             handler.onDecrypt(results, null)
         } catch (ex: UserNotAuthenticatedException) {
@@ -235,26 +241,31 @@ class CipherStorageKeystoreAesGcm(reactContext: ReactApplicationContext, private
 
     /** Initialization vector support. */
     object IV {
-        /** Encryption/Decryption initialization vector length. */
         const val IV_LENGTH = 12
         const val TAG_LENGTH = 128
 
-        /** Save Initialization vector to output stream. */
         val encrypt = EncryptStringHandler { cipher, key, output ->
             cipher.init(Cipher.ENCRYPT_MODE, key)
             val iv = cipher.iv
             output.write(iv, 0, iv.size)
         }
 
-        /** Read initialization vector from input stream and configure cipher by it. */
         val decrypt = DecryptBytesHandler { cipher, key, input ->
             val iv = ByteArray(IV_LENGTH)
-            val result = input.read(iv, 0, IV_LENGTH)
-            if (result != IV_LENGTH) throw IOException("Input stream has insufficient data.")
+
+            timeItNoSuspend(tag = "CustomTimer", name = "IV.read") {
+                val result = input.read(iv, 0, IV_LENGTH)
+                if (result != IV_LENGTH) throw IOException("Input stream has insufficient data.")
+            }
+
             val spec = GCMParameterSpec(TAG_LENGTH, iv)
-            cipher.init(Cipher.DECRYPT_MODE, key, spec)
+
+            timeItNoSuspend(tag = "CustomTimer", name = "IV.cipherInit") {
+                cipher.init(Cipher.DECRYPT_MODE, key, spec)
+            }
         }
     }
+
 
 
     @Throws(GeneralSecurityException::class, IOException::class)
